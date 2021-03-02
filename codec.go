@@ -4,14 +4,19 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/tiny-go/codec"
 	"github.com/tiny-go/errors"
 )
 
 const (
-	acceptHeader      = "Accept"
-	contentTypeHeader = "Content-Type"
+	acceptHeader            = "Accept"
+	contentTypeHeader       = "Content-Type"
+	contentLengthHeader     = "Content-Length"
+	transferEncodingHeader  = "Transfer-Encoding"
+	defaultTransferEncoding = "identity"
 )
 
 // codecKey is a private unique key that is used to put/get codec from the context.
@@ -35,16 +40,22 @@ func Codec(fn errors.HandlerFunc, codecs Codecs) Middleware {
 			var reqCodec, resCodec codec.Codec
 			// get request codec
 			if reqCodec = codecs.Lookup(r.Header.Get(contentTypeHeader)); reqCodec == nil {
-				fn(w, fmt.Sprintf("unsupported request codec: %q", r.Header.Get(contentTypeHeader)), http.StatusBadRequest)
-				return
+				if isContentTypeHeaderRequired(r) {
+					fn(w, fmt.Sprintf("unsupported request codec: %q", r.Header.Get(contentTypeHeader)), http.StatusBadRequest)
+					return
+				}
+			} else {
+				r = r.WithContext(context.WithValue(r.Context(), codecKey{"req"}, reqCodec))
 			}
-			r = r.WithContext(context.WithValue(r.Context(), codecKey{"req"}, reqCodec))
 			// get response codec
 			if resCodec = codecs.Lookup(r.Header.Get(acceptHeader)); resCodec == nil {
-				fn(w, fmt.Sprintf("unsupported response codec: %q", r.Header.Get(acceptHeader)), http.StatusBadRequest)
-				return
+				if isAcceptHeaderRequired(r) {
+					fn(w, fmt.Sprintf("unsupported response codec: %q", r.Header.Get(acceptHeader)), http.StatusBadRequest)
+					return
+				}
+			} else {
+				r = r.WithContext(context.WithValue(r.Context(), codecKey{"res"}, resCodec))
 			}
-			r = r.WithContext(context.WithValue(r.Context(), codecKey{"res"}, resCodec))
 			// call the next handler
 			next.ServeHTTP(w, r)
 		})
@@ -61,4 +72,73 @@ func RequestCodecFromContext(ctx context.Context) codec.Codec {
 func ResponseCodecFromContext(ctx context.Context) codec.Codec {
 	codec, _ := ctx.Value(codecKey{"res"}).(codec.Codec)
 	return codec
+}
+
+// isContentTypeHeaderRequired returns the HTTP method request body type requirement.
+// By RFC7231 (https://tools.ietf.org/html/rfc7231) only POST, PUT and PATCH methods
+// should contain a request body. DELETE method body is optional.
+func isContentTypeHeaderRequired(r *http.Request) bool {
+	switch r.Method {
+	// Body is required
+	case http.MethodPost: fallthrough
+	case http.MethodPut: fallthrough
+	case http.MethodPatch:
+		return shouldRequestBodyBeProcessed(r, true)
+	// May have body, but not required
+	case http.MethodDelete:
+		return shouldRequestBodyBeProcessed(r, false)
+	// No body
+	case http.MethodGet: fallthrough
+	case http.MethodHead: fallthrough
+	case http.MethodConnect: fallthrough
+	case http.MethodOptions: fallthrough
+	case http.MethodTrace: fallthrough
+	default:
+		return false
+	}
+}
+
+// isAcceptHeaderRequired returns the HTTP method response body type requirement.
+// By RFC7231 (https://tools.ietf.org/html/rfc7231) only GET, POST, CONNECT,
+// OPTIONS and PATCH methods should indicate the details of a response body.
+// DELETE method response body is optional.
+func isAcceptHeaderRequired(r *http.Request) bool {
+	switch r.Method {
+	// Body is required
+	case http.MethodGet: fallthrough
+	case http.MethodPost: fallthrough
+	case http.MethodConnect: fallthrough
+	case http.MethodOptions: fallthrough
+	case http.MethodPatch:
+		return true
+	// May have body, but not required
+	case http.MethodDelete: fallthrough
+	// No body
+	case http.MethodHead: fallthrough
+	case http.MethodPut: fallthrough
+	case http.MethodTrace: fallthrough
+	default:
+		return false
+	}
+}
+
+func shouldRequestBodyBeProcessed(r *http.Request, required bool) bool {
+	transferEncoding := r.Header.Get(transferEncodingHeader)
+	hasRequestBody := transferEncoding != "" && !strings.EqualFold(transferEncoding, defaultTransferEncoding)
+
+	hasRequestBody = hasRequestBody || func() bool {
+		contentLengthStr := r.Header.Get(contentLengthHeader)
+		if contentLengthStr != "" {
+			contentLength, err := strconv.Atoi(contentLengthStr)
+			if err != nil || contentLength < 0 {
+				return false
+			}
+
+			return contentLength > 0
+		}
+
+		return required
+	}()
+
+	return hasRequestBody
 }

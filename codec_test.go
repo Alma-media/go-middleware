@@ -21,24 +21,65 @@ func TestCodecFromList(t *testing.T) {
 		body    string
 	}
 
+	type Data struct {
+		Test string
+	}
+
 	cases := []testCase{
 		{
-			title:   "should throw an error if request codec in not supported",
+			title:   "should throw an error if a request codec is required but not supported",
 			handler: Codec(nil, driver.DummyRegistry{&json.JSON{}, &xml.XML{}})(nil),
 			request: func() *http.Request {
-				r, _ := http.NewRequest(http.MethodGet, "", nil)
+				r, _ := http.NewRequest(http.MethodPost, "", nil)
 				r.Header.Set(contentTypeHeader, "unknown")
+				r.Header.Set(contentLengthHeader, "1")
 				return r
 			}(),
 			code: http.StatusBadRequest,
 			body: "unsupported request codec: \"unknown\"\n",
 		},
 		{
-			title:   "should throw an error if response codec in not supported",
+			title:   "should ignore a request codec if not supported but not required",
+			handler: Codec(nil, driver.DummyRegistry{&json.JSON{}, &xml.XML{}})(
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Write([]byte("passed"))
+				}),
+			),
+			request: func() *http.Request {
+				r, _ := http.NewRequest(http.MethodDelete, "", nil)
+				r.Header.Set(contentTypeHeader, "unknown")
+				return r
+			}(),
+			code: http.StatusOK,
+			body: "passed",
+		},
+		{
+			title:   "should use a request codec if supported but not required",
+			handler: Codec(nil, driver.DummyRegistry{&json.JSON{}, &xml.XML{}})(
+				BodyClose(
+						http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						var data Data
+						RequestCodecFromContext(r.Context()).Decoder(r.Body).Decode(&data)
+						w.Write([]byte(data.Test))
+					}),
+				),
+			),
+			request: func() *http.Request {
+				r, _ := http.NewRequest(http.MethodDelete, "", strings.NewReader("{\"test\":\"passed\"}\n"))
+				r.Header.Set(contentTypeHeader, "application/json")
+				r.Header.Set(contentLengthHeader, "1")
+				return r
+			}(),
+			code: http.StatusOK,
+			body: "passed",
+		},
+		{
+			title:   "should throw an error if response codec is required but not supported",
 			handler: Codec(nil, driver.DummyRegistry{&json.JSON{}, &xml.XML{}})(nil),
 			request: func() *http.Request {
-				r, _ := http.NewRequest(http.MethodGet, "", nil)
+				r, _ := http.NewRequest(http.MethodPost, "", nil)
 				r.Header.Set(contentTypeHeader, "application/json")
+				r.Header.Set(contentLengthHeader, "0")
 				r.Header.Set(acceptHeader, "unknown")
 				return r
 			}(),
@@ -46,11 +87,43 @@ func TestCodecFromList(t *testing.T) {
 			body: "unsupported response codec: \"unknown\"\n",
 		},
 		{
+			title:   "should ignore a response codec if not supported but not required",
+			handler: Codec(nil, driver.DummyRegistry{&json.JSON{}, &xml.XML{}})(
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Write([]byte("passed"))
+				}),
+			),
+			request: func() *http.Request {
+				r, _ := http.NewRequest(http.MethodDelete, "", nil)
+				r.Header.Set(acceptHeader, "unknown")
+				return r
+			}(),
+			code: http.StatusOK,
+			body: "passed",
+		},
+		{
+			title:   "should use a response codec if supported but not required",
+			handler: Codec(nil, driver.DummyRegistry{&json.JSON{}, &xml.XML{}})(
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					data := Data{
+						Test: "passed",
+					}
+					ResponseCodecFromContext(r.Context()).Encoder(w).Encode(data)
+				}),
+			),
+			request: func() *http.Request {
+				r, _ := http.NewRequest(http.MethodDelete, "", nil)
+				r.Header.Set(acceptHeader, "application/xml")
+				return r
+			}(),
+			code: http.StatusOK,
+			body: "<Data><Test>passed</Test></Data>",
+		},
+		{
 			title: "should find corresponding codecs and handle the request successfully",
 			handler: Codec(nil, driver.DummyRegistry{&json.JSON{}, &xml.XML{}})(
 				BodyClose(
 					http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-						type Data struct{ Test string }
 						var data Data
 						RequestCodecFromContext(r.Context()).Decoder(r.Body).Decode(&data)
 						ResponseCodecFromContext(r.Context()).Encoder(w).Encode(data)
@@ -58,8 +131,9 @@ func TestCodecFromList(t *testing.T) {
 				),
 			),
 			request: func() *http.Request {
-				r, _ := http.NewRequest(http.MethodGet, "", strings.NewReader("{\"test\":\"passed\"}\n"))
+				r, _ := http.NewRequest(http.MethodPost, "", strings.NewReader("{\"test\":\"passed\"}\n"))
 				r.Header.Set(contentTypeHeader, "application/json")
+				r.Header.Set(contentLengthHeader, "1")
 				r.Header.Set(acceptHeader, "application/xml")
 				return r
 			}(),
