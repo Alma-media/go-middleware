@@ -38,7 +38,12 @@ func (mw Middleware) Use(middlewares ...Middleware) Middleware {
 	for _, next := range middlewares {
 		mw = func(curr, next Middleware) Middleware {
 			return func(handler http.Handler) http.Handler {
-				return curr(next(handler))
+				var nextHandler http.Handler
+				currHandler := curr(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					nextHandler.ServeHTTP(w, r)
+				}))
+				nextHandler = next(handler)
+				return currHandler
 			}
 		}(mw, next)
 	}
